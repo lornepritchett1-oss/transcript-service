@@ -1,503 +1,608 @@
-from __future__ import annotations
-
-import re
-from typing import Any, Dict, List, Optional
-
 from fastapi import FastAPI
 from pydantic import BaseModel
+from youtube_transcript_api import YouTubeTranscriptApi
+import re
+import os
+from datetime import datetime
 
-from trusted_sources import (
-    ALL_TRUSTED_TERMS,
-    TRUSTED_SOURCES,
-    fetch_transcript,
-    filter_and_rank,
-    search_youtube_candidates,
-)
+app = FastAPI()
 
-APP_VERSION = "2026-03-20-main-app-stable-v5"
-
-app = FastAPI(title="Bible GPT Transcript Service", version=APP_VERSION)
+OUTPUT_DIR = "transcripts"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-class QueryRequest(BaseModel):
+class TranscriptRequest(BaseModel):
     query: str
 
 
-BIBLE_BOOKS = [
+BOOK_NAMES = [
     "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy",
     "Joshua", "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
-    "1 Chronicles", "2 Chronicles", "Ezra", "Nehemiah", "Esther", "Job", "Psalms",
-    "Proverbs", "Ecclesiastes", "Song of Solomon", "Isaiah", "Jeremiah",
-    "Lamentations", "Ezekiel", "Daniel", "Hosea", "Joel", "Amos", "Obadiah",
-    "Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah", "Haggai", "Zechariah",
-    "Malachi", "Matthew", "Mark", "Luke", "John", "Acts", "Romans",
-    "1 Corinthians", "2 Corinthians", "Galatians", "Ephesians", "Philippians",
-    "Colossians", "1 Thessalonians", "2 Thessalonians", "1 Timothy", "2 Timothy",
-    "Titus", "Philemon", "Hebrews", "James", "1 Peter", "2 Peter", "1 John",
-    "2 John", "3 John", "Jude", "Revelation",
+    "1 Chronicles", "2 Chronicles", "Ezra", "Nehemiah", "Esther", "Job",
+    "Psalms", "Psalm", "Proverbs", "Ecclesiastes", "Song of Solomon", "Song of Songs",
+    "Isaiah", "Jeremiah", "Lamentations", "Ezekiel", "Daniel", "Hosea", "Joel",
+    "Amos", "Obadiah", "Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah",
+    "Haggai", "Zechariah", "Malachi", "Matthew", "Mark", "Luke", "John", "Acts",
+    "Romans", "1 Corinthians", "2 Corinthians", "Galatians", "Ephesians",
+    "Philippians", "Colossians", "1 Thessalonians", "2 Thessalonians",
+    "1 Timothy", "2 Timothy", "Titus", "Philemon", "Hebrews", "James",
+    "1 Peter", "2 Peter", "1 John", "2 John", "3 John", "Jude", "Revelation"
 ]
 
-KNOWN_TOPICS = [
-    "justification",
-    "sanctification",
-    "holiness",
-    "second coming",
-    "rapture",
-    "tribulation",
-    "kingdom of god",
-    "atonement",
-    "resurrection",
-    "inspiration of scripture",
+SECTION_BREAK_WORDS = [
+    "first", "second", "third", "finally", "now", "notice", "listen",
+    "look at this", "let me say", "another thing", "on the other hand",
+    "the point is", "here is the point", "in closing", "to conclude",
+    "application", "illustration", "for example", "here's why"
 ]
 
-BOOK_AUTHOR_MAP: Dict[str, List[str]] = {
-    "daniel": [
-        "renald showers",
-        "john walvoord",
-        "leon wood",
-        "charles feinberg",
-        "john macarthur",
-    ],
-    "revelation": [
-        "john walvoord",
-        "j. dwight pentecost",
-        "robert thomas",
-        "john macarthur",
-    ],
-    "romans": [
-        "john macarthur",
-        "james montgomery boice",
-        "douglas moo",
-        "john stott",
-    ],
-    "psalms": [
-        "derek kidner",
-        "allen ross",
-        "martin luther",
-        "john calvin",
-    ],
-    "obadiah": [
-        "john macarthur",
-        "leon wood",
-        "charles feinberg",
-    ],
+STOPWORDS = {
+    "the", "and", "that", "with", "have", "this", "from", "your", "they",
+    "will", "their", "about", "there", "would", "could", "should", "what",
+    "when", "where", "which", "into", "because", "then", "than", "just",
+    "them", "were", "been", "being", "also", "some", "more", "very", "much",
+    "said", "says", "unto", "you", "for", "are", "not", "but", "our", "his",
+    "her", "had", "has", "was", "who", "how", "why", "can", "all", "out",
+    "history", "earth", "planet", "world", "thing", "things", "really",
+    "people", "time", "times", "something", "someone", "many", "make",
+    "made", "does", "did", "doing", "here", "therefore", "again", "only",
+    "over", "under", "through", "before", "after", "same", "present",
+    "future", "end", "beginning", "began", "take", "place", "fact"
 }
 
+THEME_PATTERNS = [
+    {
+        "name": "The Sovereignty of God",
+        "patterns": ["sovereign", "sovereignty", "omnipotent", "lord of the universe"],
+        "priority": 4
+    },
+    {
+        "name": "The Purpose of History",
+        "patterns": ["purpose of history", "ultimate purpose", "world history"],
+        "priority": 4
+    },
+    {
+        "name": "The Kingdom of God",
+        "patterns": ["kingdom", "theocratic", "rule over the earth", "kingdom rule"],
+        "priority": 5
+    },
+    {
+        "name": "The Defeat of Satan",
+        "patterns": ["satan", "enemy", "crush satan", "gets rid of satan", "crush your head"],
+        "priority": 4
+    },
+    {
+        "name": "The Reign of Christ",
+        "patterns": ["thousand year reign", "reign of jesus christ", "millennial kingdom", "christ will reign"],
+        "priority": 5
+    },
+    {
+        "name": "The Fall of Man",
+        "patterns": ["adam", "fall", "lost through the fall", "fall of man", "man's sin"],
+        "priority": 5
+    },
+    {
+        "name": "The Glory of God",
+        "patterns": ["glorify himself", "glory of god", "god to glorify himself"],
+        "priority": 4
+    },
+    {
+        "name": "The Promise of the Redeemer",
+        "patterns": ["promise of the redeemer", "seed of the woman", "genesis chapter 3", "genesis 3", "first promise"],
+        "priority": 7
+    },
+    {
+        "name": "The Curse and Restoration of Creation",
+        "patterns": ["creation groans", "travails in pain", "curse", "nature restored", "restored back", "whole of creation"],
+        "priority": 7
+    },
+    {
+        "name": "Judgment and Accountability",
+        "patterns": ["judgment", "judge", "account", "wrath"],
+        "priority": 5
+    },
+    {
+        "name": "Salvation by Grace",
+        "patterns": ["grace", "saved", "salvation", "redeemed"],
+        "priority": 5
+    },
+    {
+        "name": "Faith and Obedience",
+        "patterns": ["obedience", "faith", "trust", "submit"],
+        "priority": 4
+    },
+    {
+        "name": "The Authority of Scripture",
+        "patterns": ["scripture", "word of god", "bible says"],
+        "priority": 4
+    },
+    {
+        "name": "The Gospel of Christ",
+        "patterns": ["cross", "resurrection", "gospel", "jesus christ"],
+        "priority": 5
+    },
+    {
+        "name": "Prayer and Dependence",
+        "patterns": ["prayer", "pray", "calling on god"],
+        "priority": 3
+    },
+    {
+        "name": "Holiness and Separation",
+        "patterns": ["holy", "holiness", "sanctification", "separation"],
+        "priority": 3
+    },
+    {
+        "name": "The Work of the Spirit",
+        "patterns": ["holy spirit", "spirit of god", "spirit"],
+        "priority": 3
+    },
+]
 
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip())
-
-
-def normalize_lower(text: str) -> str:
-    return normalize(text).lower()
-
-
-def detect_book(query: str) -> Optional[str]:
-    q = normalize_lower(query)
-    for book in sorted(BIBLE_BOOKS, key=len, reverse=True):
-        if re.search(rf"\b{re.escape(book.lower())}\b", q):
-            return book
-    return None
-
-
-def detect_topic(query: str) -> Optional[str]:
-    q = normalize_lower(query)
-    for topic in sorted(KNOWN_TOPICS, key=len, reverse=True):
-        if topic in q:
-            return topic
-    return None
-
-
-def detect_author(query: str) -> Optional[str]:
-    q = normalize_lower(query)
-    for term in ALL_TRUSTED_TERMS:
-        if term in q:
-            return term
-    return None
-
-
-def extract_reference_parts(query: str) -> Dict[str, Optional[str]]:
-    q = normalize_lower(query)
-
-    chapter = None
-    verse = None
-
-    verse_match = re.search(r"\b\d{1,3}:(\d{1,3})\b", q)
-    if verse_match:
-        verse = verse_match.group(1)
-
-    chapter_match = re.search(r"\b([1-3]?\s*[a-z]+(?:\s+[a-z]+)?)\s+(\d{1,3})(?::\d{1,3})?\b", q)
-    if chapter_match:
-        chapter = str(int(chapter_match.group(2)))
-
-    return {
-        "chapter": chapter,
-        "verse": verse,
+SPECIAL_SUBTHEMES = [
+    {
+        "label": "Satan's Strategy Against the Redeemer",
+        "patterns": ["prevent that redeemer", "try to prevent", "coming redeemer", "promised redeemer from coming", "seed of the woman"],
+        "base_theme": "The Defeat of Satan"
+    },
+    {
+        "label": "The Preservation of the Messianic Line",
+        "patterns": ["abel", "seth", "genealogy", "descendant of seth", "god's substitute for abel"],
+        "base_theme": "The Defeat of Satan"
+    },
+    {
+        "label": "Persecution and Apostasy",
+        "patterns": ["persecute", "massacre", "apostasy", "falling away", "drifting away", "go apostate"],
+        "base_theme": "The Defeat of Satan"
+    },
+    {
+        "label": "Cain and Abel",
+        "patterns": ["cain and abel", "cain", "abel", "murdered his brother", "first murder"],
+        "base_theme": "The Defeat of Satan"
+    },
+    {
+        "label": "The Days of Noah",
+        "patterns": ["days of noah", "noah", "genesis chapter 6", "every imagination", "evil continually"],
+        "base_theme": "The Fall of Man"
+    },
+    {
+        "label": "The Promise in Genesis 3:15",
+        "patterns": ["genesis chapter 3", "genesis 3", "verse 15", "seed of the woman", "crush your head"],
+        "base_theme": "The Promise of the Redeemer"
+    },
+    {
+        "label": "Creation Under the Curse",
+        "patterns": ["creation groans", "travails in pain", "curse of man's sin", "whole of creation"],
+        "base_theme": "The Curse and Restoration of Creation"
+    },
+    {
+        "label": "Creation Restored in Christ's Reign",
+        "patterns": ["nature restored", "jesus is going to do that", "authority to do that", "restored back the way it was"],
+        "base_theme": "The Curse and Restoration of Creation"
+    },
+    {
+        "label": "The Kingdom Under Attack",
+        "patterns": ["members of god's kingdom", "kingdom of god's dear son", "destroy those people", "transferred out of satan's domain"],
+        "base_theme": "The Kingdom of God"
+    },
+    {
+        "label": "The Counterattack of God",
+        "patterns": ["how did god counteract", "god counteract", "god had to intervene", "god would keep raising up"],
+        "base_theme": "The Sovereignty of God"
     }
+]
 
 
-def detect_mode(query: str) -> Dict[str, Optional[str]]:
-    author = detect_author(query)
-    book = detect_book(query)
-    topic = detect_topic(query)
-    ref = extract_reference_parts(query)
-
-    if author:
-        return {
-            "routing_mode": "author",
-            "book_detected": book,
-            "topic_detected": topic,
-            "author_requested": author,
-            "chapter_detected": ref["chapter"],
-            "verse_detected": ref["verse"],
-        }
-
-    if book:
-        return {
-            "routing_mode": "book",
-            "book_detected": book,
-            "topic_detected": topic,
-            "author_requested": None,
-            "chapter_detected": ref["chapter"],
-            "verse_detected": ref["verse"],
-        }
-
-    if topic:
-        return {
-            "routing_mode": "topic",
-            "book_detected": None,
-            "topic_detected": topic,
-            "author_requested": None,
-            "chapter_detected": ref["chapter"],
-            "verse_detected": ref["verse"],
-        }
-
-    return {
-        "routing_mode": "fallback",
-        "book_detected": None,
-        "topic_detected": None,
-        "author_requested": None,
-        "chapter_detected": ref["chapter"],
-        "verse_detected": ref["verse"],
-    }
+def extract_video_id(url):
+    match = re.search(r"(?:v=|youtu\.be/)([\w-]+)", url)
+    return match.group(1) if match else None
 
 
-def preferred_authors_for_route(route: Dict[str, Optional[str]]) -> List[str]:
-    if route["routing_mode"] == "author" and route["author_requested"]:
-        return [str(route["author_requested"]).lower()]
-
-    if route["routing_mode"] == "book" and route["book_detected"]:
-        book_key = str(route["book_detected"]).lower()
-        if book_key in BOOK_AUTHOR_MAP:
-            return BOOK_AUTHOR_MAP[book_key]
-        return TRUSTED_SOURCES.get("prophecy_core", [])[:5]
-
-    if route["routing_mode"] == "topic" and route["topic_detected"]:
-        topic = str(route["topic_detected"]).lower()
-        if topic in {"second coming", "rapture", "tribulation"}:
-            return TRUSTED_SOURCES.get("prophecy_core", [])[:6]
-        return TRUSTED_SOURCES.get("evangelical_core", [])[:6]
-
-    return TRUSTED_SOURCES.get("prophecy_core", [])[:5]
+def clean_text(text):
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
-def build_search_queries(query: str, route: Dict[str, Optional[str]], preferred_authors: List[str]) -> List[str]:
-    q = normalize(query)
-    searches: List[str] = []
+def format_timestamp(seconds):
+    total_seconds = int(seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
 
-    if route["routing_mode"] == "author" and route["author_requested"]:
-        author = str(route["author_requested"])
-        searches.append(q)
-        searches.append(f"{author} {q}")
-
-    elif route["routing_mode"] == "book" and route["book_detected"]:
-        book = str(route["book_detected"])
-        chapter = route.get("chapter_detected")
-
-        searches.append(q)
-
-        for author in preferred_authors[:5]:
-            searches.append(f"{book} {author}")
-            searches.append(f"{book} study {author}")
-            if chapter:
-                searches.append(f"{book} {chapter} {author}")
-                searches.append(f"{book} chapter {chapter} {author}")
-
-        searches.append(f"{book} Bible study")
-        searches.append(f"{book} sermon")
-        if chapter:
-            searches.append(f"{book} {chapter}")
-            searches.append(f"{book} chapter {chapter}")
-
-    elif route["routing_mode"] == "topic" and route["topic_detected"]:
-        topic = str(route["topic_detected"])
-        searches.append(q)
-
-        for author in preferred_authors[:5]:
-            searches.append(f"{topic} {author}")
-            searches.append(f"{topic} teaching {author}")
-
-        searches.append(f"{topic} Bible study")
-        searches.append(f"{topic} sermon")
-
-    else:
-        searches.append(q)
-
-    deduped: List[str] = []
-    seen = set()
-    for item in searches:
-        key = item.lower().strip()
-        if key and key not in seen:
-            seen.add(key)
-            deduped.append(item)
-
-    return deduped
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
-def extract_candidate_chapters(title: str, book: Optional[str]) -> List[str]:
-    if not title:
-        return []
+def extract_scripture_references(text):
+    refs = set()
 
-    t = normalize_lower(title)
-    found: List[str] = []
-    seen = set()
+    for book in sorted(BOOK_NAMES, key=len, reverse=True):
+        pattern = rf"\b{re.escape(book)}\s+\d+(?::\d+(?:[-–]\d+)?)?\b"
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        for match in matches:
+            refs.add(match.strip())
 
-    if book:
-        book_l = str(book).lower()
-        patterns = [
-            rf"\b{re.escape(book_l)}\s+0*(\d{{1,3}})\b",
-            rf"\b{re.escape(book_l)}\s*\(\s*0*(\d{{1,3}})\s*\)",
-            rf"\b{re.escape(book_l)}\s+chapter\s+0*(\d{{1,3}})\b",
-            rf"\bchapter\s+0*(\d{{1,3}})\b",
-        ]
-
-        for pattern in patterns:
-            for match in re.finditer(pattern, t):
-                chapter = str(int(match.group(1)))
-                if chapter not in seen:
-                    seen.add(chapter)
-                    found.append(chapter)
-
-    return found
+    return sorted(refs)
 
 
-def route_relevance_score(candidate: Dict[str, Any], route: Dict[str, Optional[str]]) -> int:
-    title = normalize_lower(str(candidate.get("title", "")))
-    channel = normalize_lower(str(candidate.get("channel", "")))
-    author = normalize_lower(str(candidate.get("author", "")))
-    combined = f"{title} {channel} {author}".strip()
+def roman_numeral(num):
+    mapping = [
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")
+    ]
+    result = ""
+    for value, symbol in mapping:
+        while num >= value:
+            result += symbol
+            num -= value
+    return result
 
+
+def detect_section_boundary(text):
+    lowered = text.lower()
+    for marker in SECTION_BREAK_WORDS:
+        if marker in lowered:
+            return True
+    return False
+
+
+def build_sections(transcript, target_words=220, max_words=320):
+    sections = []
+    current_items = []
+    current_words = 0
+    section_start = 0.0
+
+    for item in transcript:
+        text = clean_text(item.get("text", ""))
+        if not text:
+            continue
+
+        start_time = float(item.get("start", 0.0))
+
+        if not current_items:
+            section_start = start_time
+
+        current_items.append({
+            "text": text,
+            "start": start_time
+        })
+        current_words += len(text.split())
+
+        boundary = detect_section_boundary(text)
+
+        should_close = False
+        if current_words >= max_words:
+            should_close = True
+        elif current_words >= target_words and boundary:
+            should_close = True
+
+        if should_close:
+            section_text = " ".join(x["text"] for x in current_items).strip()
+            section_end = current_items[-1]["start"]
+            sections.append({
+                "start": section_start,
+                "end": section_end,
+                "text": section_text
+            })
+            current_items = []
+            current_words = 0
+
+    if current_items:
+        section_text = " ".join(x["text"] for x in current_items).strip()
+        section_end = current_items[-1]["start"]
+        sections.append({
+            "start": section_start,
+            "end": section_end,
+            "text": section_text
+        })
+
+    return sections
+
+
+def extract_top_keywords(text, limit=8):
+    words = re.findall(r"\b[a-zA-Z][a-zA-Z'-]{3,}\b", text.lower())
+    counts = {}
+
+    for word in words:
+        if word in STOPWORDS:
+            continue
+        counts[word] = counts.get(word, 0) + 1
+
+    ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    return [word for word, _ in ranked[:limit]]
+
+
+def score_theme(section_text, theme):
+    lowered = section_text.lower()
     score = 0
 
-    book = route.get("book_detected")
-    topic = route.get("topic_detected")
-    requested_author = route.get("author_requested")
-    chapter = route.get("chapter_detected")
-    verse = route.get("verse_detected")
+    for pattern in theme["patterns"]:
+        occurrences = lowered.count(pattern)
+        if occurrences > 0:
+            score += occurrences * 3
 
-    if requested_author and str(requested_author).lower() in combined:
-        score += 40
+    words = re.findall(r"\b[a-zA-Z][a-zA-Z'-]{2,}\b", lowered)
+    word_set = set(words)
 
-    if book:
-        book_l = str(book).lower()
+    for pattern in theme["patterns"]:
+        for token in pattern.split():
+            cleaned = token.strip().lower()
+            if len(cleaned) > 3 and cleaned in word_set:
+                score += 1
 
-        # For book queries, missing the requested book in the title is a major problem.
-        if book_l in title:
-            score += 70
-        elif book_l in combined:
-            score += 10
-        else:
-            score -= 140
-
-    if topic:
-        topic_l = str(topic).lower()
-        if topic_l in title:
-            score += 35
-        elif topic_l in combined:
-            score += 15
-
-    if chapter and book:
-        requested_chapter = str(int(str(chapter)))
-        candidate_chapters = extract_candidate_chapters(title, book)
-
-        if candidate_chapters:
-            if requested_chapter in candidate_chapters:
-                score += 80
-            else:
-                score -= 110
-
-        if re.search(rf"\bchapter\s+0*{re.escape(requested_chapter)}\b", combined):
-            score += 25
-
-        if re.search(rf"\b{re.escape(str(book).lower())}\s+0*{re.escape(requested_chapter)}\b", title):
-            score += 40
-
-    if verse:
-        v = str(verse)
-        if re.search(rf"\b{re.escape(v)}\b", title):
-            score += 5
-
-    if route.get("routing_mode") == "book":
-        if "sermon" in combined or "study" in combined or "teaching" in combined or "lecture" in combined:
-            score += 8
-
+    score += theme["priority"]
     return score
 
 
-def rerank_for_route(ranked: List[Dict[str, Any]], route: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
-    rescored: List[Dict[str, Any]] = []
+def rank_themes(section_text):
+    scored = []
+    for theme in THEME_PATTERNS:
+        score = score_theme(section_text, theme)
+        if score > theme["priority"]:
+            scored.append((theme["name"], score))
 
-    for candidate in ranked:
-        copy_candidate = dict(candidate)
-        base_score = int(copy_candidate.get("score", 0))
-        route_bonus = route_relevance_score(copy_candidate, route)
-        final_score = base_score + route_bonus
-
-        # Hard cleanup for book queries: candidates with no book in title should not survive near the top.
-        book = route.get("book_detected")
-        title = normalize_lower(str(copy_candidate.get("title", "")))
-        if book and str(book).lower() not in title:
-            final_score -= 80
-
-        copy_candidate["base_score"] = base_score
-        copy_candidate["route_bonus"] = route_bonus
-        copy_candidate["final_score"] = final_score
-        rescored.append(copy_candidate)
-
-    rescored.sort(key=lambda x: int(x.get("final_score", 0)), reverse=True)
-    return rescored
+    scored.sort(key=lambda x: (-x[1], x[0]))
+    return scored
 
 
-def build_failure(
-    query: str,
-    route: Dict[str, Optional[str]],
-    preferred_authors: List[str],
-    search_queries: List[str],
-    raw_candidate_count: int,
-    ranked_candidate_count: int,
-    reason: str,
-) -> Dict[str, Any]:
-    return {
-        "success": False,
-        "query": query,
-        "routing_mode": route["routing_mode"],
-        "book_detected": route["book_detected"],
-        "topic_detected": route["topic_detected"],
-        "author_requested": route["author_requested"],
-        "chapter_detected": route["chapter_detected"],
-        "verse_detected": route["verse_detected"],
-        "preferred_authors_used": preferred_authors,
-        "source_name": None,
-        "title": None,
-        "video_url": None,
-        "source_kind": None,
-        "excerpt": "",
-        "confidence_score": 0,
-        "reason": reason,
-        "app_version": APP_VERSION,
-        "debug": {
-            "query_used": search_queries,
-            "raw_candidate_count": raw_candidate_count,
-            "ranked_candidate_count": ranked_candidate_count,
-            "top_candidates": [],
-        },
-    }
+def detect_theme(section_text):
+    ranked = rank_themes(section_text)
+    return ranked[0][0] if ranked else None
 
 
-@app.get("/health")
-def health() -> Dict[str, Any]:
-    return {
-        "ok": True,
-        "app_version": APP_VERSION,
-        "trusted_terms_count": len(ALL_TRUSTED_TERMS),
-    }
+def detect_special_subtheme(section_text, preferred_base_theme=None):
+    lowered = section_text.lower()
+    matches = []
+
+    for item in SPECIAL_SUBTHEMES:
+        if preferred_base_theme and item["base_theme"] != preferred_base_theme:
+            continue
+
+        score = 0
+        for pattern in item["patterns"]:
+            occurrences = lowered.count(pattern)
+            if occurrences > 0:
+                score += occurrences * 4
+
+        if score > 0:
+            matches.append((item["label"], score, item["base_theme"]))
+
+    matches.sort(key=lambda x: (-x[1], x[0]))
+    return matches[0] if matches else None
+
+
+def choose_heading_label(section_text, recent_labels=None):
+    recent_labels = recent_labels or []
+    refs = extract_scripture_references(section_text)
+    ranked_themes = rank_themes(section_text)
+
+    top_theme = ranked_themes[0][0] if ranked_themes else None
+
+    preferred_subtheme = detect_special_subtheme(section_text, preferred_base_theme=top_theme)
+    any_subtheme = detect_special_subtheme(section_text)
+
+    if preferred_subtheme:
+        label = preferred_subtheme[0]
+        if label not in recent_labels:
+            return label
+
+    if ranked_themes:
+        for theme_name, _score in ranked_themes:
+            if theme_name not in recent_labels:
+                competing_subtheme = detect_special_subtheme(section_text, preferred_base_theme=theme_name)
+                if competing_subtheme and competing_subtheme[0] not in recent_labels:
+                    return competing_subtheme[0]
+                return theme_name
+
+        if any_subtheme:
+            return any_subtheme[0]
+
+        if len(ranked_themes) >= 2 and ranked_themes[0][1] - ranked_themes[1][1] <= 2:
+            first = ranked_themes[0][0]
+            second = ranked_themes[1][0]
+            if first != second:
+                return f"{first} / {second}"
+
+        return ranked_themes[0][0]
+
+    if refs:
+        return refs[0]
+
+    keywords = extract_top_keywords(section_text, limit=4)
+    if keywords:
+        return " / ".join(word.title() for word in keywords[:3])
+
+    return "Main Thought"
+
+
+def build_section_headings(sections):
+    headings = []
+    recent_labels = []
+
+    for i, section in enumerate(sections, start=1):
+        label = choose_heading_label(section["text"], recent_labels=recent_labels[-3:])
+        headings.append(f"Section {i}: {label}")
+        recent_labels.append(label)
+
+    return headings
+
+
+def build_preaching_outline(sections, headings):
+    outline = []
+
+    for i, (section, heading) in enumerate(zip(sections[:7], headings[:7]), start=1):
+        heading_core = heading.replace(f"Section {i}: ", "").strip()
+        refs = extract_scripture_references(section["text"])
+
+        if refs and refs[0].lower() not in heading_core.lower():
+            if len(heading_core) < 55:
+                heading_core = f"{heading_core} ({refs[0]})"
+
+        outline.append(f"{roman_numeral(i)}. {heading_core}")
+
+    return outline
+
+
+def extract_key_quotes_from_sections(sections, limit=5):
+    quotes = []
+
+    for section in sections:
+        text = section["text"].strip()
+        if 18 <= len(text.split()) <= 70:
+            quotes.append(f"[{format_timestamp(section['start'])}] {text}")
+        if len(quotes) >= limit:
+            break
+
+    return quotes
+
+
+def generate_title_suggestions(full_text, scripture_refs, headings):
+    titles = []
+    detected_labels = []
+
+    for heading in headings[:12]:
+        label = heading.split(": ", 1)[1] if ": " in heading else heading
+        if label not in detected_labels:
+            detected_labels.append(label)
+
+    if scripture_refs:
+        titles.append(f"The Message of {scripture_refs[0]}")
+        titles.append(f"Understanding {scripture_refs[0]}")
+
+    if detected_labels:
+        titles.append(detected_labels[0])
+        titles.append(f"God's Word on {detected_labels[0]}")
+
+    if len(detected_labels) >= 2:
+        titles.append(f"{detected_labels[0]} and {detected_labels[1]}")
+
+    if len(detected_labels) >= 3:
+        titles.append(f"From {detected_labels[0]} to {detected_labels[2]}")
+
+    keywords = extract_top_keywords(full_text, limit=5)
+    if keywords:
+        keyword_phrase = ", ".join(word.title() for word in keywords[:3])
+        titles.append(f"Truth for the Heart: {keyword_phrase}")
+
+    titles.append("A Call to Biblical Clarity")
+    titles.append("When God Speaks, We Must Listen")
+
+    seen = set()
+    unique_titles = []
+    for title in titles:
+        if title not in seen:
+            unique_titles.append(title)
+            seen.add(title)
+
+    return unique_titles[:6]
+
+
+def write_section_file(path, sections, headings):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("TIMESTAMPED TEACHING SECTIONS\n\n")
+        for section, heading in zip(sections, headings):
+            start_str = format_timestamp(section["start"])
+            end_str = format_timestamp(section["end"])
+            f.write(f"{heading}\n")
+            f.write(f"[{start_str} - {end_str}]\n\n")
+            f.write(section["text"] + "\n\n")
+            f.write("=" * 80 + "\n\n")
+
+
+def write_titles_file(path, titles):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("SERMON TITLE SUGGESTIONS\n\n")
+        for i, title in enumerate(titles, start=1):
+            f.write(f"{i}. {title}\n")
+
+
+def write_scripture_file(path, refs):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("SCRIPTURE REFERENCES DETECTED\n\n")
+        if refs:
+            for ref in refs:
+                f.write(ref + "\n")
+        else:
+            f.write("No explicit Scripture references detected.\n")
 
 
 @app.post("/get_youtube_transcript")
-def get_youtube_transcript(req: QueryRequest) -> Dict[str, Any]:
-    query = normalize(req.query)
+def get_transcript(request: TranscriptRequest):
+    video_id = extract_video_id(request.query)
 
-    if not query:
-        return build_failure(
-            query="",
-            route={
-                "routing_mode": "fallback",
-                "book_detected": None,
-                "topic_detected": None,
-                "author_requested": None,
-                "chapter_detected": None,
-                "verse_detected": None,
-            },
-            preferred_authors=[],
-            search_queries=[],
-            raw_candidate_count=0,
-            ranked_candidate_count=0,
-            reason="Empty query.",
-        )
+    if not video_id:
+        return {"error": "Invalid YouTube URL"}
 
-    route = detect_mode(query)
-    preferred_authors = preferred_authors_for_route(route)
-    search_queries = build_search_queries(query, route, preferred_authors)
+    fetched_transcript = YouTubeTranscriptApi().fetch(video_id)
+    transcript = fetched_transcript.to_raw_data()
 
-    raw_candidates: List[Dict[str, Any]] = []
-    for sq in search_queries:
-        try:
-            raw_candidates.extend(search_youtube_candidates(sq, max_results=8))
-        except Exception:
-            continue
+    raw_segments = [item.get("text", "") for item in transcript]
+    clean_segments = [clean_text(t) for t in raw_segments if clean_text(t)]
+    full_text = " ".join(clean_segments)
 
-    trusted_ranked = filter_and_rank(raw_candidates)
+    sections = build_sections(transcript)
+    headings = build_section_headings(sections)
+    paragraphs = [section["text"] for section in sections]
+    scripture_refs = extract_scripture_references(full_text)
+    title_suggestions = generate_title_suggestions(full_text, scripture_refs, headings)
+    preaching_outline = build_preaching_outline(sections, headings)
+    key_quotes = extract_key_quotes_from_sections(sections, limit=5)
 
-    if not trusted_ranked:
-        return build_failure(
-            query=query,
-            route=route,
-            preferred_authors=preferred_authors,
-            search_queries=search_queries,
-            raw_candidate_count=len(raw_candidates),
-            ranked_candidate_count=0,
-            reason="No trusted candidates found.",
-        )
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_filename = f"{video_id}_{timestamp}"
 
-    final_ranked = rerank_for_route(trusted_ranked, route)
-    winner = final_ranked[0]
-    transcript = fetch_transcript(str(winner.get("video_url", "")))
+    raw_path = os.path.join(OUTPUT_DIR, f"{base_filename}_raw.txt")
+    clean_path = os.path.join(OUTPUT_DIR, f"{base_filename}_clean.txt")
+    paragraph_path = os.path.join(OUTPUT_DIR, f"{base_filename}_paragraphs.txt")
+    section_path = os.path.join(OUTPUT_DIR, f"{base_filename}_sections.txt")
+    outline_path = os.path.join(OUTPUT_DIR, f"{base_filename}_outline.txt")
+    quotes_path = os.path.join(OUTPUT_DIR, f"{base_filename}_quotes.txt")
+    titles_path = os.path.join(OUTPUT_DIR, f"{base_filename}_titles.txt")
+    scripture_path = os.path.join(OUTPUT_DIR, f"{base_filename}_scriptures.txt")
 
-    top_candidates = []
-    for c in final_ranked[:5]:
-        top_candidates.append({
-            "title": c.get("title", ""),
-            "video_url": c.get("video_url", ""),
-            "channel": c.get("channel", ""),
-            "author": c.get("author", ""),
-            "base_score": c.get("base_score", c.get("score", 0)),
-            "route_bonus": c.get("route_bonus", 0),
-            "final_score": c.get("final_score", c.get("score", 0)),
-            "source_kind": c.get("source_kind", ""),
-        })
+    with open(raw_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(raw_segments))
+
+    with open(clean_path, "w", encoding="utf-8") as f:
+        f.write(full_text)
+
+    with open(paragraph_path, "w", encoding="utf-8") as f:
+        for p in paragraphs:
+            f.write(p + "\n\n")
+
+    with open(outline_path, "w", encoding="utf-8") as f:
+        f.write("PREACHING OUTLINE\n\n")
+        for line in preaching_outline:
+            f.write(line + "\n")
+
+    with open(quotes_path, "w", encoding="utf-8") as f:
+        f.write("KEY QUOTES\n\n")
+        for q in key_quotes:
+            f.write(q + "\n\n")
+
+    write_section_file(section_path, sections, headings)
+    write_titles_file(titles_path, title_suggestions)
+    write_scripture_file(scripture_path, scripture_refs)
 
     return {
-        "success": True,
-        "query": query,
-        "routing_mode": route["routing_mode"],
-        "book_detected": route["book_detected"],
-        "topic_detected": route["topic_detected"],
-        "author_requested": route["author_requested"],
-        "chapter_detected": route["chapter_detected"],
-        "verse_detected": route["verse_detected"],
-        "preferred_authors_used": preferred_authors,
-        "source_name": winner.get("author") or winner.get("channel") or "",
-        "title": winner.get("title", ""),
-        "video_url": winner.get("video_url", ""),
-        "source_kind": "video_transcript" if transcript else winner.get("source_kind", "video_search"),
-        "excerpt": transcript[:800] if transcript else "",
-        "confidence_score": winner.get("final_score", winner.get("score", 0)),
-        "reason": "Top ranked trusted candidate selected after stricter book-aware rerank.",
-        "app_version": APP_VERSION,
-        "debug": {
-            "query_used": search_queries,
-            "raw_candidate_count": len(raw_candidates),
-            "ranked_candidate_count": len(final_ranked),
-            "top_candidates": top_candidates,
-        },
+        "status": "success",
+        "video_id": video_id,
+        "language": getattr(fetched_transcript, "language", None),
+        "language_code": getattr(fetched_transcript, "language_code", None),
+        "is_generated": getattr(fetched_transcript, "is_generated", None),
+        "segment_count": len(transcript),
+        "word_count": len(full_text.split()),
+        "section_count": len(sections),
+        "scripture_reference_count": len(scripture_refs),
+        "files": {
+            "raw": raw_path,
+            "clean": clean_path,
+            "paragraphs": paragraph_path,
+            "sections": section_path,
+            "outline": outline_path,
+            "quotes": quotes_path,
+            "titles": titles_path,
+            "scriptures": scripture_path
+        }
     }
